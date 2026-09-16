@@ -12,6 +12,7 @@ Subclasses only need to override methods where their behavior differs.
 import gc
 import time
 import uuid
+from contextlib import nullcontext
 from typing import Dict, List, Optional
 
 import torch
@@ -287,20 +288,26 @@ class Sam3BasePredictor:
                 if k in sig.parameters:
                     propagate_kwargs[k] = v
 
-            # Forward propagation
-            if propagation_direction in ["both", "forward"]:
-                for frame_idx, outputs in self.model.propagate_in_video(
-                    **propagate_kwargs,
-                    reverse=False,
-                ):
-                    yield {"frame_index": frame_idx, "outputs": outputs}
-            # Backward propagation
-            if propagation_direction in ["both", "backward"]:
-                for frame_idx, outputs in self.model.propagate_in_video(
-                    **propagate_kwargs,
-                    reverse=True,
-                ):
-                    yield {"frame_index": frame_idx, "outputs": outputs}
+            autocast_context = (
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                if torch.cuda.is_available()
+                else nullcontext()
+            )
+            with autocast_context:
+                # Forward propagation
+                if propagation_direction in ["both", "forward"]:
+                    for frame_idx, outputs in self.model.propagate_in_video(
+                        **propagate_kwargs,
+                        reverse=False,
+                    ):
+                        yield {"frame_index": frame_idx, "outputs": outputs}
+                # Backward propagation
+                if propagation_direction in ["both", "backward"]:
+                    for frame_idx, outputs in self.model.propagate_in_video(
+                        **propagate_kwargs,
+                        reverse=True,
+                    ):
+                        yield {"frame_index": frame_idx, "outputs": outputs}
         finally:
             logger.info(f"propagation ended in session {session_id}")
 

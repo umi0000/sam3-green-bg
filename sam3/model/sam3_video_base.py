@@ -620,6 +620,9 @@ class Sam3VideoBase(nn.Module):
         )
         # remove from `feature_cache` old features to save GPU memory
         feature_cache.pop(frame_idx - 1 if not reverse else frame_idx + 1, None)
+        if os.environ.get("SAM3_LOW_MEMORY", "").lower() in {"1", "true", "yes", "on"}:
+            feature_cache.get("multigpu_buffer", {}).clear()
+            del sam3_image_out, pred_probs, pred_boxes_xyxy, pred_masks
         return det_out
 
     def run_tracker_propagation(

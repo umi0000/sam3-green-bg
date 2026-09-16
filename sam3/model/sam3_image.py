@@ -723,6 +723,11 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
             gather_backbone_out = isinstance(self.backbone, SAM3VLBackbone)
         self.gather_backbone_out = gather_backbone_out
 
+    @staticmethod
+    def _low_memory_mode_enabled():
+        value = os.environ.get("SAM3_LOW_MEMORY", "")
+        return value.lower() in {"1", "true", "yes", "on"}
+
     def forward_video_grounding_multigpu(
         self,
         backbone_out: Dict,
@@ -745,9 +750,26 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
         Compute the detector's detection outputs in a distributed manner, where all GPUs process
         a chunk of frames (equal to the number of GPUs) at once and store them in cache.
         """
+        low_memory_mode = self._low_memory_mode_enabled()
+        prefetch_next_chunk = self.world_size > 1 and not low_memory_mode
+
         # Step 1: fetch the detector outputs in the current chunk from buffer
         frame_idx_curr_b = frame_idx - frame_idx % self.world_size
         frame_idx_curr_e = min(frame_idx_curr_b + self.world_size, num_frames)
+
+        if low_memory_mode:
+            if not track_in_reverse and frame_idx_curr_b - self.world_size >= 0:
+                frame_idx_prev_e = frame_idx_curr_b
+                frame_idx_prev_b = frame_idx_curr_b - self.world_size
+            elif track_in_reverse and frame_idx_curr_e < num_frames:
+                frame_idx_prev_b = frame_idx_curr_e
+                frame_idx_prev_e = min(frame_idx_prev_b + self.world_size, num_frames)
+            else:
+                frame_idx_prev_b = frame_idx_prev_e = None
+            if frame_idx_prev_b is not None:
+                for frame_idx_rm in range(frame_idx_prev_b, frame_idx_prev_e):
+                    multigpu_buffer.pop(frame_idx_rm, None)
+
         # in case the current frame's detection results are not in the buffer yet, build the current chunk
         # (this should only happen on the first chunk, since we are also building the next chunk below)
         if frame_idx not in multigpu_buffer:
@@ -775,21 +797,24 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
             out[k] = v
 
         # Step 2: remove detection outputs of the previous chunk from cache to save GPU memory
-        if not track_in_reverse and frame_idx_curr_b - self.world_size >= 0:
-            frame_idx_prev_e = frame_idx_curr_b
-            frame_idx_prev_b = frame_idx_curr_b - self.world_size
-        elif track_in_reverse and frame_idx_curr_e < num_frames:
-            frame_idx_prev_b = frame_idx_curr_e
-            frame_idx_prev_e = min(frame_idx_prev_b + self.world_size, num_frames)
-        else:
-            frame_idx_prev_b = frame_idx_prev_e = None
-        if frame_idx_prev_b is not None:
-            for frame_idx_rm in range(frame_idx_prev_b, frame_idx_prev_e):
-                multigpu_buffer.pop(frame_idx_rm, None)
+        if not low_memory_mode:
+            if not track_in_reverse and frame_idx_curr_b - self.world_size >= 0:
+                frame_idx_prev_e = frame_idx_curr_b
+                frame_idx_prev_b = frame_idx_curr_b - self.world_size
+            elif track_in_reverse and frame_idx_curr_e < num_frames:
+                frame_idx_prev_b = frame_idx_curr_e
+                frame_idx_prev_e = min(frame_idx_prev_b + self.world_size, num_frames)
+            else:
+                frame_idx_prev_b = frame_idx_prev_e = None
+            if frame_idx_prev_b is not None:
+                for frame_idx_rm in range(frame_idx_prev_b, frame_idx_prev_e):
+                    multigpu_buffer.pop(frame_idx_rm, None)
 
         # Step 3: compute and cache detection outputs of the next chunk ahead of time
         # (so that we can overlap computation with all-gather transfer)
-        if not track_in_reverse and frame_idx_curr_e < num_frames:
+        if not prefetch_next_chunk:
+            frame_idx_next_b = frame_idx_next_e = None
+        elif not track_in_reverse and frame_idx_curr_e < num_frames:
             frame_idx_next_b = frame_idx_curr_e
             frame_idx_next_e = min(frame_idx_next_b + self.world_size, num_frames)
         elif track_in_reverse and frame_idx_curr_b - self.world_size >= 0:
