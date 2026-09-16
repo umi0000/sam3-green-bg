@@ -1,3 +1,10 @@
+# 本项目是基于sam3，用于自动制作绿幕视频
+在example里面有一个`sam3_video_predictor_example.ipynb`，目前使用它进行抠像操作。
+没有正经开发，纯粹为了使用而临时改了一个（其实是让codex改的）
+优化了显存占用，支持在8GB vram下跑个2s的1080p视频））
+使用前记得从[这里](https://www.modelscope.cn/models/facebook/sam3/files)下载模型
+以下则是sam3自身的readme。
+
 # SAM 3: Segment Anything with Concepts
 
 Meta Superintelligence Labs
